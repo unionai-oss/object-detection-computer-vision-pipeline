@@ -185,3 +185,64 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
     print("Training completed.")
 
 
+# --------------------------------
+# evaluate model - task
+# --------------------------------
+
+@task
+def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
+    # Load the model's state dictionary
+    model_load_path = '/content/best_model.pth'
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)  # Initialize the model
+    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)  # Adjust the classifier
+
+    model.load_state_dict(torch.load(model_load_path, map_location=device))  # Load the state dictionary
+    model.to(device)  # Move the model to the appropriate device
+    print(f"Model loaded from {model_load_path}")
+
+    # Define the transformations for the test images
+    test_transform = T.Compose([T.ToTensor()])
+
+    # Load the test dataset
+    test_dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/test.json', transform=test_transform)
+
+    # Use the custom collate function for the test dataset
+    test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn)
+
+    # Function to display an image with its bounding boxes and labels
+    def show_image_with_predictions(image, predictions):
+        fig, ax = plt.subplots(1)
+        ax.imshow(image.permute(1, 2, 0))  # Convert image tensor to (H, W, C) format for visualization
+
+        for prediction in predictions:
+            bbox = prediction['bbox']
+            score = prediction['score']
+            label = prediction['label']
+            # Create a rectangle patch
+            rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1], linewidth=1, edgecolor='r', facecolor='none')
+            # Add the patch to the Axes
+            ax.add_patch(rect)
+            plt.text(bbox[0], bbox[1], f"{label}: {score:.2f}", color='white', fontsize=8, bbox=dict(facecolor='red', alpha=0.5))
+
+        plt.show()
+
+    # Visualize predictions on the test dataset
+    model.eval()
+    with torch.no_grad():
+        for images, targets in test_data_loader:
+            images = list(image.to(device) for image in images)
+
+            outputs = model(images)
+
+            for i, output in enumerate(outputs):
+                image = images[i].cpu()
+                predictions = []
+                for j in range(len(output['boxes'])):
+                    bbox = output['boxes'][j].cpu().numpy()
+                    score = output['scores'][j].cpu().item()
+                    label = output['labels'][j].cpu().item()
+                    if score > 0.5:  # Only display predictions with a confidence score above 0.5
+                        predictions.append({'bbox': bbox, 'score': score, 'label': label})
+                show_image_with_predictions(image, predictions)
+
+    # add IoU calculation for each photo and only show a few images in Flytedeck 
