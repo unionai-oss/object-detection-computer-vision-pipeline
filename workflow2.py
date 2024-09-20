@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from torchvision.ops import box_iou
 from flytekit import task, workflow
+from torchvision.models.detection.faster_rcnn import FasterRCNN_ResNet50_FPN_Weights
+
+
 
 # Check and set the available device
 device = (
@@ -31,21 +34,17 @@ hyperparams = {
     "gamma": 0.1,
     "num_epochs": 10
 }
-#%% ------------------------------
-# Download data set - task
-# --------------------------------
-
 
 
 #%% ------------------------------
 # Load data set (create data loader)
 # --------------------------------
 # @task
-def load_dataset():
-    # Define the custom collate function
-    def collate_fn(batch):
-        return tuple(zip(*batch))
+# Define the custom collate function
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
+def load_dataset():
     # Define the transformations for the images
     transform = T.Compose([T.ToTensor()])
 
@@ -53,6 +52,12 @@ def load_dataset():
     dataset = CocoDetection(root='data/swag', annFile='data/swag/train.json', transform=transform)
     data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=collate_fn)
     return data_loader
+
+
+
+#%% ------------------------------
+# Download data set - task
+# --------------------------------
 
 #%% ------------------------------
 # visualize data - task
@@ -85,18 +90,27 @@ visualize_data(load_dataset())
 # --------------------------------
 
 @task
-def download_model():
+def download_model() -> torch.nn.Module:
     # Load a pre-trained model
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1)
+    # model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
     # model.to(device)
+    # print(model)
     return model
 
-# --------------------------------
+model = download_model()
+print(model)
+# print(model.roi_heads.box_predictor.cls_score.in_features)
+
+#%% ------------------------------
 # train model - task
 # --------------------------------
+@task
 def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: dict):
     
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
+    num_epochs = 1
+    best_mean_iou = 0
 
     # Modify the model to add a new classification head based on the number of classes
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -172,12 +186,10 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
         return mean_iou, accuracy
 
     # Load the test dataset for evaluation
-    test_dataset = CocoDetection(root='/content/swag', annFile='/content/swag/train.json', transform=transform)
-    test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-    # Training loop
-    num_epochs = 10
-    best_mean_iou = 0
+    transform = T.Compose([T.ToTensor()])
+    test_dataset = CocoDetection(root='data/swag', annFile='data/swag/train.json', transform=transform)
+    test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
     for epoch in range(num_epochs):
         model.train()
@@ -215,15 +227,21 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
 
     print("Training completed.")
 
+train_model(download_model(), load_dataset(), hyperparams)
 
-# --------------------------------
+
+#%% ------------------------------
 # evaluate model - task
 # --------------------------------
 
 @task
 def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
+
+    num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+
     # Load the model's state dictionary
-    model_load_path = '/content/best_model.pth'
+    model_load_path = 'best_model.pth'
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)  # Initialize the model
     model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)  # Adjust the classifier
 
@@ -235,10 +253,10 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
     test_transform = T.Compose([T.ToTensor()])
 
     # Load the test dataset
-    test_dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/test.json', transform=test_transform)
+    test_dataset = CocoDetection(root='data/swag/', annFile='data/swag/train.json', transform=test_transform)
 
     # Use the custom collate function for the test dataset
-    test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn)
+    test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
     # Function to display an image with its bounding boxes and labels
     def show_image_with_predictions(image, predictions):
@@ -276,5 +294,6 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
                         predictions.append({'bbox': bbox, 'score': score, 'label': label})
                 show_image_with_predictions(image, predictions)
 
+evaluate_model(download_model(), load_dataset())
     # add IoU calculation for each photo and only show a few images in Flytedeck 
 # %%
