@@ -2,7 +2,7 @@
 Object Detection Workflow with Flyte and PyTorch using the Faster R-CNN model
 
 """
-
+# %%
 import torch
 import torch.optim as optim
 import torchvision
@@ -31,11 +31,16 @@ hyperparams = {
     "gamma": 0.1,
     "num_epochs": 10
 }
+#%% ------------------------------
+# Download data set - task
+# --------------------------------
 
+
+
+#%% ------------------------------
+# Load data set (create data loader)
 # --------------------------------
-# load data set (create data loader) - task
-# --------------------------------
-@task
+# @task
 def load_dataset():
     # Define the custom collate function
     def collate_fn(batch):
@@ -45,11 +50,37 @@ def load_dataset():
     transform = T.Compose([T.ToTensor()])
 
     # Load the dataset
-    dataset = CocoDetection(root='/content/swag', annFile='/content/swag/train.json', transform=transform)
-    data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    dataset = CocoDetection(root='data/swag', annFile='data/swag/train.json', transform=transform)
+    data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=collate_fn)
     return data_loader
 
+#%% ------------------------------
+# visualize data - task
 # --------------------------------
+@task
+def visualize_data(data_loader: DataLoader):
+    # Function to display an image with its bounding boxes
+    def show_image_with_boxes(image, annotations):
+        fig, ax = plt.subplots(1)
+        ax.imshow(image.permute(1, 2, 0))
+
+        for annotation in annotations:
+            bbox = annotation['bbox']
+            rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2], bbox[3], linewidth=1, edgecolor='r', facecolor='none')
+            ax.add_patch(rect)
+
+        plt.show()
+
+    # Visualize a batch of images
+    for images, targets in data_loader:
+        for i, image in enumerate(images):
+            show_image_with_boxes(image, targets[i])
+
+visualize_data(load_dataset())
+
+
+
+#%% ------------------------------
 # donwload model - task
 # --------------------------------
 
@@ -246,3 +277,4 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
                 show_image_with_predictions(image, predictions)
 
     # add IoU calculation for each photo and only show a few images in Flytedeck 
+# %%
