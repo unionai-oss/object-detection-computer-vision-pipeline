@@ -3,19 +3,19 @@ Object Detection Workflow with Flyte and PyTorch using the Faster R-CNN model
 
 """
 
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 # %%
 import torch
 import torch.optim as optim
 import torchvision
+from flytekit import task, workflow
 from torch.utils.data import DataLoader
 from torchvision.datasets import CocoDetection
-from torchvision.transforms import transforms as T
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from torchvision.models.detection.faster_rcnn import \
+    FasterRCNN_ResNet50_FPN_Weights
 from torchvision.ops import box_iou
-from flytekit import task, workflow
-from torchvision.models.detection.faster_rcnn import FasterRCNN_ResNet50_FPN_Weights
-
+from torchvision.transforms import transforms as T
 
 # Check and set the available device
 device = "cuda" if torch.cuda.is_available() else "cpu"
