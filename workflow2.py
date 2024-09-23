@@ -89,10 +89,11 @@ def dataset_dataloader(
       requests=Resources(cpu="2", mem="2Gi")) 
 
 def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
-                        local_dir: str = 'dataset',
+                        local_dir: str = "",
                         sub_folder: str = None) -> FlyteDirectory:
     
     from huggingface_hub import snapshot_download
+
 
     if local_dir:
         dataset_dir = os.path.join(local_dir)
@@ -101,7 +102,7 @@ def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
     # Download the dataset repository
     repo_path = snapshot_download(repo_id=repo_id, 
                                   repo_type="dataset",
-                                  local_dir=dataset_dir)
+                                  local_dir=local_dir)
     if sub_folder:
         repo_path = os.path.join(repo_path, sub_folder)
         # use sub_folder to return a specific folder from the dataset
@@ -110,7 +111,7 @@ def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
 
     return FlyteDirectory(repo_path)
 
-download_hf_dataset(sub_folder="swag")
+download_hf_dataset(local_dir="datasets",sub_folder="swag")
 
 # %% ------------------------------
 # visualize data - task
