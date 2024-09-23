@@ -2,20 +2,38 @@
 Object Detection Workflow with Flyte and PyTorch using the Faster R-CNN model
 
 """
-
+# %%
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
-# %%
+
 import torch
 import torch.optim as optim
 import torchvision
-from flytekit import task, workflow
+from flytekit import task, workflow, ImageSpec, Resources
 from torch.utils.data import DataLoader
 from torchvision.datasets import CocoDetection
 from torchvision.models.detection.faster_rcnn import \
     FasterRCNN_ResNet50_FPN_Weights
 from torchvision.ops import box_iou
 from torchvision.transforms import transforms as T
+from flytekit.types.directory import FlyteDirectory
+
+
+from datasets import load_dataset
+import os
+import requests
+
+
+image = ImageSpec(
+    packages=[
+        "union==0.1.64",
+        "torch",
+        "torchvision",
+        "matplotlib",
+        "pycocotools",
+        "datasets",
+    ],
+)
 
 # Check and set the available device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,8 +59,7 @@ hyperparams = {
 def collate_fn(batch):
     return tuple(zip(*batch))
 
-
-def load_dataset(
+def dataset_dataloader(
     root,
     annFile,
     batch_size=2,
@@ -70,14 +87,34 @@ def load_dataset(
 # %% ------------------------------
 # Download data set - task
 # --------------------------------
+@task(container_image=image, 
+      requests=Resources(cpu="2", mem="2Gi")) 
 
+def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
+                        local_dir: str = '',
+                        sub_folder: str = None) -> FlyteDirectory:
+    from huggingface_hub import snapshot_download
+
+    # Download the dataset repository
+    repo_path = snapshot_download(repo_id=repo_id, 
+                                  repo_type="dataset",
+                                  local_dir=local_dir)
+    if sub_folder:
+        repo_path = os.path.join(repo_path, sub_folder)
+
+    print(f"Dataset downloaded to {repo_path}")
+
+    return FlyteDirectory(repo_path)
+
+# download_hf_dataset(sub_folder="swag")
 
 # %% ------------------------------
 # visualize data - task
 # --------------------------------
-@task
+@task(container_image=image,
+    requests=Resources(cpu="2", mem="2Gi"))
 def visualize_data():
-    data_loader = load_dataset("data/swag", "data/swag/train.json")
+    data_loader = dataset_dataloader("data/swag", "data/swag/train.json")
 
     # Function to display an image with its bounding boxes
     def show_image_with_boxes(image, annotations):
@@ -104,15 +141,14 @@ def visualize_data():
             show_image_with_boxes(image, targets[i])
 
 
-visualize_data()
+# visualize_data()
 
 
 # %% ------------------------------
 # donwload model - task
 # --------------------------------
-
-
-@task
+@task(container_image=image,
+    requests=Resources(cpu="2", mem="2Gi"))
 def download_model() -> torch.nn.Module:
     # Load a pre-trained model
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
@@ -124,16 +160,18 @@ def download_model() -> torch.nn.Module:
     return model
 
 
-model = download_model()
-print(model)
+# model = download_model()
+# print(model)
 # print(model.roi_heads.box_predictor.cls_score.in_features)
 
 
 # %% ------------------------------
 # train model - task
 # --------------------------------
-@task
+@task(container_image=image,
+    requests=Resources(cpu="2", mem="4Gi", gpu="1"))
 def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: dict):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
     num_epochs = 1
@@ -285,17 +323,17 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
     print("Training completed.")
 
 
-train_model(
-    download_model(), load_dataset("data/swag", "data/swag/train.json"), hyperparams
-)
+# train_model(
+#     download_model(), dataset_dataloader("data/swag", "data/swag/train.json"), hyperparams
+# )
 
 
 # %% ------------------------------
 # evaluate model - task
 # --------------------------------
 
-
-@task
+@task(container_image=image,
+    requests=Resources(cpu="2", mem="2Gi", gpu="1"))
 def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
 
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
@@ -388,6 +426,16 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
                 show_image_with_predictions(image, predictions)
 
 
-evaluate_model(download_model(), load_dataset("data/swag", "data/swag/train.json"))
+# evaluate_model(download_model(), dataset_dataloader("data/swag", "data/swag/train.json"))
 # add IoU calculation for each photo and only show a few images in Flytedeck
 # %%
+@workflow
+def object_detection_workflow():
+    model = download_model()
+    data_loader = dataset_dataloader("data/swag", "data/swag/train.json")
+    train_model(model=model, data_loader=data_loader, hyperparams=hyperparams)
+    evaluate_model(model=model, data_loader=data_loader)
+
+# union run --remote workflow2.py object_detection_workflow
+
+# union run --remote --copy-all workflow2.py object_detection_workflow
