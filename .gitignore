@@ -1,0 +1,8 @@
+venv
+/venv
+/data
+models
+/models
+.cache
+.gitattributes
+dataset
