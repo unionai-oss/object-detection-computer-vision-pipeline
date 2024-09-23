@@ -52,10 +52,8 @@ hyperparams = {
 
 
 # %% ------------------------------
-# Load data set (create data loader)
+# Data loading helper functions
 # --------------------------------
-# @task
-# Define the custom collate function
 def collate_fn(batch):
     return tuple(zip(*batch))
 
@@ -91,22 +89,28 @@ def dataset_dataloader(
       requests=Resources(cpu="2", mem="2Gi")) 
 
 def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
-                        local_dir: str = '',
+                        local_dir: str = 'dataset',
                         sub_folder: str = None) -> FlyteDirectory:
+    
     from huggingface_hub import snapshot_download
+
+    if local_dir:
+        dataset_dir = os.path.join(local_dir)
+        os.makedirs(dataset_dir, exist_ok=True)
 
     # Download the dataset repository
     repo_path = snapshot_download(repo_id=repo_id, 
                                   repo_type="dataset",
-                                  local_dir=local_dir)
+                                  local_dir=dataset_dir)
     if sub_folder:
         repo_path = os.path.join(repo_path, sub_folder)
+        # use sub_folder to return a specific folder from the dataset
 
     print(f"Dataset downloaded to {repo_path}")
 
     return FlyteDirectory(repo_path)
 
-# download_hf_dataset(sub_folder="swag")
+download_hf_dataset(sub_folder="swag")
 
 # %% ------------------------------
 # visualize data - task
