@@ -197,7 +197,7 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
 
     # TODO: make from dict
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
-    num_epochs = 1
+    num_epochs = 10
     best_mean_iou = 0
     model_dir = "models"
 
@@ -303,16 +303,6 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
         print(f"Mean IoU: {mean_iou:.4f}, Accuracy: {accuracy:.4f}")
         return mean_iou, accuracy
 
-    # Load the test dataset for evaluation
-
-    # transform = T.Compose([T.ToTensor()])
-    # test_dataset = CocoDetection(
-    #     root="data/swag", annFile="data/swag/train.json", transform=transform
-    # )
-    # test_data_loader = DataLoader(
-    #     test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
-    # )
-
     for epoch in range(num_epochs):
         model.train()
         for i, (images, targets) in enumerate(data_loader):
@@ -370,83 +360,234 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
 
 # %% ------------------------------
 # evaluate model - task
-# --------------------------------
-
+# ---------------------------------
 @task(container_image=image,
       enable_deck=True,
       requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-
 def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     
     dataset_dir.download()
-    # model_dir.download()
-
     local_dataset_dir = dataset_dir.path
-    # local_model_dir = model_dir.path 
-    
-    data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
+    data_loader = dataset_dataloader(root=local_dataset_dir, 
+                                     annFile="train.json", shuffle=False)
+
     model.to(device)
     model.eval()
 
-    # Create a figure for displaying predictions in a 3x3 grid (9 images)
     num_images = 9  # Number of images to display in the grid
     fig, axes = plt.subplots(3, 3, figsize=(15, 15))  # Create a 3x3 grid
     axes = axes.flatten()  # Flatten the axes array for easier iteration
 
+    iou_list, accuracy_list = [], []
+    report = []  # To store the IoU and accuracy report for each image
+    global_image_index = 0  # Global image counter across batches
+    images_plotted = 0  # Counter for images plotted in the grid
+
     with torch.no_grad():
-        for idx, (images, targets) in enumerate(data_loader):
-            if idx >= num_images:
-                break  # Stop after processing enough images for the grid
+        for batch_idx, (images, targets) in enumerate(data_loader):
+            images = [image.to(device) for image in images]
+            targets = [
+                {
+                    "boxes": torch.tensor(
+                        [obj["bbox"] for obj in t], dtype=torch.float32
+                    ).to(device),
+                    "labels": torch.tensor(
+                        [obj["category_id"] for obj in t], dtype=torch.int64
+                    ).to(device),
+                }
+                for t in targets
+            ]
+            for target in targets:
+                boxes = target["boxes"]
+                boxes[:, 2] += boxes[:, 0]  # Convert width to x_max
+                boxes[:, 3] += boxes[:, 1]  # Convert height to y_max
+                target["boxes"] = boxes
 
-            image = images[0].to(device)
-            output = model([image])[0]
+            outputs = model(images)
 
-            image = image.cpu().permute(1, 2, 0)  # Convert image to HWC format for plotting
-            ax = axes[idx]
+            for i, output in enumerate(outputs):
+                pred_boxes = output["boxes"]
+                true_boxes = targets[i]["boxes"]
 
-            ax.imshow(image)
-            for j in range(len(output['boxes'])):
-                bbox = output['boxes'][j].cpu().numpy()
-                score = output['scores'][j].cpu().item()
-                label = output['labels'][j].cpu().item()
+                # Get the global image index
+                image_index = global_image_index + i
 
-                if score > 0.6:  # Only display predictions with confidence score above 0.7
-                    rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1],
-                                             linewidth=2, edgecolor='r', facecolor='none')
-                    ax.add_patch(rect)
-                    ax.text(bbox[0], bbox[1], f"{label}: {score:.2f}", color="white", fontsize=8,
-                            bbox=dict(facecolor="red", alpha=0.5))
+                if pred_boxes.size(0) == 0 or true_boxes.size(0) == 0:
+                    report.append(f"Image {image_index}: No valid predictions or ground truths")
+                    continue
 
-            ax.axis('off')  # Hide axes
+                # Calculate IoU
+                iou = box_iou(pred_boxes, true_boxes)
+                mean_iou = iou.mean().item()
+                iou_list.append(mean_iou)
 
-    plt.tight_layout()
+                # Calculate accuracy
+                pred_labels = output["labels"]
+                true_labels = targets[i]["labels"]
+                min_size = min(len(pred_labels), len(true_labels))
+                correct_predictions = (pred_labels[:min_size] == true_labels[:min_size]).sum().item()
+                accuracy = correct_predictions / min_size if min_size else 0
+                accuracy_list.append(accuracy)
 
-    # Save the grid image
+                # Append report for this image
+                report.append(f"Image {image_index}: IoU = {mean_iou:.4f}, Accuracy = {accuracy:.4f}")
+
+                # Plot images (limit to num_images)
+                if images_plotted < num_images:
+                    img = images[i].cpu().permute(1, 2, 0)  # Convert image to HWC format for plotting
+                    ax = axes[images_plotted]  # Access the correct subplot
+
+                    ax.imshow(img)
+                    for j in range(len(output['boxes'])):
+                        bbox = output['boxes'][j].cpu().numpy()
+                        score = output['scores'][j].cpu().item()
+                        label = output['labels'][j].cpu().item()
+
+                        if score > 0.6:  # Only display predictions with confidence score above 0.6
+                            rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1],
+                                                     linewidth=2, edgecolor='r', facecolor='none')
+                            ax.add_patch(rect)
+                            ax.text(bbox[0], bbox[1], f"{label}: {score:.2f}", color="white", fontsize=8,
+                                    bbox=dict(facecolor="red", alpha=0.5))
+                    ax.axis('off')  # Hide axes
+                    images_plotted += 1
+
+            # Update global image index after processing the batch
+            global_image_index += len(images)
+
+            if images_plotted >= num_images:  # Break once we've plotted 9 images
+                break
+
+    # Compute overall metrics
+    overall_iou = sum(iou_list) / len(iou_list) if iou_list else 0
+    overall_accuracy = sum(accuracy_list) / len(accuracy_list) if accuracy_list else 0
+
+
+
+    # Save the image grid
     pred_boxes_imgs = "prediction_grid.png"
+    plt.tight_layout()
     plt.savefig(pred_boxes_imgs)
     plt.close()
 
     train_image_base64 = image_to_base64(pred_boxes_imgs)
 
+    # Prepare the report as text
+    report_text = "\n".join(report)
+    overall_report = dedent(f"""
+    Overall Metrics:
+    ----------------
+    Mean IoU: {overall_iou:.4f}
+    Mean Accuracy: {overall_accuracy:.4f}
+
+    Per-Image Metrics:
+    ------------------
+    {report_text}
+    """)
+
+    # Display the report in FlyteDeck
     ctx = current_context()
     deck = Deck("Evaluation Results")
     html_report = dedent(f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-        <h2 style="color: #2C3E50;">Dataset Analysis</h2>
+       <h2 style="color: #2C3E50;">Predicted Bounding Boxes</h2>
         <img src="data:image/png;base64,{train_image_base64}" width="600">
+    </div>               
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2 style="color: #2C3E50;">Evaluation Report</h2>
+        <pre>{overall_report}</pre>
     </div>
+
     """)
 
     # Append HTML content to the deck
     deck.append(html_report)
-
-    # Insert the deck into the context
     ctx.decks.insert(0, deck)
 
+    
 
-    # print("Evaluation completed.")
-    # Return the image file to FlyteDeck
-    return "test"
+    return overall_report
+
+
+
+
+# @task(container_image=image,
+#       enable_deck=True,
+#       requests=Resources(cpu="2", mem="8Gi", gpu="1"))
+
+# def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
+    
+#     dataset_dir.download()
+#     # model_dir.download()
+
+#     local_dataset_dir = dataset_dir.path
+#     # local_model_dir = model_dir.path 
+    
+#     data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
+#     model.to(device)
+#     model.eval()
+
+#     # Create a figure for displaying predictions in a 3x3 grid (9 images)
+#     num_images = 9  # Number of images to display in the grid
+#     fig, axes = plt.subplots(3, 3, figsize=(15, 15))  # Create a 3x3 grid
+#     axes = axes.flatten()  # Flatten the axes array for easier iteration
+
+#     with torch.no_grad():
+#         for idx, (images, targets) in enumerate(data_loader):
+#             if idx >= num_images:
+#                 break  # Stop after processing enough images for the grid
+
+#             image = images[0].to(device)
+#             output = model([image])[0]
+
+#             image = image.cpu().permute(1, 2, 0)  # Convert image to HWC format for plotting
+#             ax = axes[idx]
+
+#             ax.imshow(image)
+#             for j in range(len(output['boxes'])):
+#                 bbox = output['boxes'][j].cpu().numpy()
+#                 score = output['scores'][j].cpu().item()
+#                 label = output['labels'][j].cpu().item()
+
+#                 if score > 0.6:  # Only display predictions with confidence score above 0.7
+#                     rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1],
+#                                              linewidth=2, edgecolor='r', facecolor='none')
+#                     ax.add_patch(rect)
+#                     ax.text(bbox[0], bbox[1], f"{label}: {score:.2f}", color="white", fontsize=8,
+#                             bbox=dict(facecolor="red", alpha=0.5))
+
+#             ax.axis('off')  # Hide axes
+
+#     plt.tight_layout()
+
+#     # Save the grid image
+#     pred_boxes_imgs = "prediction_grid.png"
+#     plt.savefig(pred_boxes_imgs)
+#     plt.close()
+
+#     train_image_base64 = image_to_base64(pred_boxes_imgs)
+
+#     ctx = current_context()
+#     deck = Deck("Evaluation Results")
+#     html_report = dedent(f"""
+#     <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+#         <h2 style="color: #2C3E50;">Predicted Bounding Boxes</h2>
+#         <img src="data:image/png;base64,{train_image_base64}" width="600">
+#     </div>
+#     """)
+
+#     # Append HTML content to the deck
+#     deck.append(html_report)
+
+#     # Insert the deck into the context
+#     ctx.decks.insert(0, deck)
+
+
+#     # print("Evaluation completed.")
+#     # Return the image file to FlyteDeck
+#     return "test"
 
 
 # add IoU calculation for each photo and only show a few images in Flytedeck
