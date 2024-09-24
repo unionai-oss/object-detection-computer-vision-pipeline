@@ -96,10 +96,12 @@ def dataset_dataloader(
 
 
 # %% ------------------------------
-# Download data set - task
+# Download dataset - task
 # --------------------------------
 @task(container_image=image,
       enable_deck=True,
+      cache=True,
+      cache_version="1.2",
       requests=Resources(cpu="2", mem="2Gi")) 
 
 def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
@@ -168,12 +170,12 @@ def visualize_data():
 # --------------------------------
 @task(container_image=image,
     cache=True,
-    cache_version="1.0",
+    cache_version="1.1",
     requests=Resources(cpu="2", mem="2Gi"))
 def download_model() -> torch.nn.Module:
     # Load a pre-trained model
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
-        weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1
+        weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1, weights_only=True
     )
     # model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
     # model.to(device)
@@ -190,8 +192,8 @@ def download_model() -> torch.nn.Module:
 # train model - task
 # --------------------------------
 @task(container_image=image,
-    requests=Resources(cpu="2", mem="4Gi", gpu="1"))
-def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams: dict) -> FlyteDirectory:
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"))
+def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams: dict) -> torch.nn.Module:
 
     # TODO: make from dict
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
@@ -358,7 +360,7 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
             print("Best model saved")
 
     print("Training completed.")
-    return FlyteDirectory(model_dir)
+    return model
 
 
 # train_model(
@@ -372,26 +374,17 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
 
 @task(container_image=image,
       enable_deck=True,
-      requests=Resources(cpu="2", mem="2Gi", gpu="1"))
+      requests=Resources(cpu="2", mem="8Gi", gpu="1"))
 
-def evaluate_model(model_dir: FlyteDirectory, dataset_dir: FlyteDirectory) -> FlyteFile:
+def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
     
     dataset_dir.download()
-    model_dir.download()
-    
-    data_loader = dataset_dataloader(root=dataset_dir, annFile="train.json")
+    # model_dir.download()
 
-    num_classes = 3  # number of classes + background
+    local_dataset_dir = dataset_dir.path
+    # local_model_dir = model_dir.path 
     
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
-        in_features, num_classes
-    )
-
-    # Load the model's state dictionary
-    model_load_path = os.path.join(str(model_dir), "best_model.pth")
-    model.load_state_dict(torch.load(model_load_path, map_location=device))
+    data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
     model.to(device)
     model.eval()
 
@@ -439,15 +432,21 @@ def evaluate_model(model_dir: FlyteDirectory, dataset_dir: FlyteDirectory) -> Fl
     deck = Deck("Evaluation Results")
     html_report = dedent(f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-        <h2 style="color: #2C3E50;">Dataset Analysis</h2
+        <h2 style="color: #2C3E50;">Dataset Analysis</h2>
         <img src="data:image/png;base64,{train_image_base64}" width="600">
     </div>
     """)
 
+    # Append HTML content to the deck
+    deck.append(html_report)
+
+    # Insert the deck into the context
+    ctx.decks.insert(0, deck)
 
 
+    # print("Evaluation completed.")
     # Return the image file to FlyteDeck
-    return FlyteFile(pred_boxes_imgs)
+    return "test"
 
 
 # add IoU calculation for each photo and only show a few images in Flytedeck
@@ -457,7 +456,7 @@ def object_detection_workflow():
     dataset_dir = download_hf_dataset()
     model = download_model()
     trained_model = train_model(model=model, dataset_dir=dataset_dir, hyperparams=hyperparams)
-    evaluate_model(model_dir=trained_model, dataset_dir=dataset_dir)
+    evaluate_model(model=trained_model, dataset_dir=dataset_dir)
 
 # union run --remote workflow2.py object_detection_workflow
 # union run workflow2.py object_detection_workflow
