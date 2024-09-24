@@ -47,7 +47,7 @@ hyperparams = {
     "weight_decay": 0.0005,
     "step_size": 3,
     "gamma": 0.1,
-    "num_epochs": 10,
+    "num_epochs": 1,
 }
 
 
@@ -58,8 +58,8 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 def dataset_dataloader(
-    root,
-    annFile,
+    root: str,
+    annFile: str,
     batch_size=2,
     shuffle=True,
     num_workers=0,
@@ -67,10 +67,14 @@ def dataset_dataloader(
     # Define the transformations for the images
     transform = T.Compose([T.ToTensor()])
 
+    annFile_path = os.path.join(str(root), annFile)
+    print(f"Annotation file path: {annFile_path}")  # Debugging the annotation file path
+
+
     # Load the dataset
     # dataset = CocoDetection(root='data/swag', annFile='data/swag/train.json', transform=transform)
     # data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=collate_fn)
-    dataset = CocoDetection(root=root, annFile=annFile, transform=transform)
+    dataset = CocoDetection(root=root, annFile=annFile_path, transform=transform)
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -85,15 +89,15 @@ def dataset_dataloader(
 # %% ------------------------------
 # Download data set - task
 # --------------------------------
-@task(container_image=image, 
+@task(container_image=image,
+      enable_deck=True,
       requests=Resources(cpu="2", mem="2Gi")) 
 
 def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
-                        local_dir: str = "",
-                        sub_folder: str = None) -> FlyteDirectory:
+                        local_dir: str = "dataset",
+                        sub_folder: str = "swag") -> FlyteDirectory:
     
     from huggingface_hub import snapshot_download
-
 
     if local_dir:
         dataset_dir = os.path.join(local_dir)
@@ -109,9 +113,11 @@ def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
 
     print(f"Dataset downloaded to {repo_path}")
 
+    print(f"Files in dataset directory: {os.listdir(repo_path)}")
+
     return FlyteDirectory(repo_path)
 
-download_hf_dataset(local_dir="datasets",sub_folder="swag")
+# download_hf_dataset(local_dir="datasets",sub_folder="swag")
 
 # %% ------------------------------
 # visualize data - task
@@ -145,7 +151,6 @@ def visualize_data():
         for i, image in enumerate(images):
             show_image_with_boxes(image, targets[i])
 
-
 # visualize_data()
 
 
@@ -153,6 +158,8 @@ def visualize_data():
 # donwload model - task
 # --------------------------------
 @task(container_image=image,
+    cache=True,
+    cache_version="1.0",
     requests=Resources(cpu="2", mem="2Gi"))
 def download_model() -> torch.nn.Module:
     # Load a pre-trained model
@@ -175,12 +182,22 @@ def download_model() -> torch.nn.Module:
 # --------------------------------
 @task(container_image=image,
     requests=Resources(cpu="2", mem="4Gi", gpu="1"))
-def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: dict):
+def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams: dict):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    dataset_dir.download()
+
+    # TODO: make from dict
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
-    num_epochs = 1
+    num_epochs = 10
     best_mean_iou = 0
+
+    # data_loader = dataset_dataloader(root=dataset_dir, annFile="train.json")
+    # test_data_loader = dataset_dataloader(root=dataset_dir, annFile="train.json")
+    local_dataset_dir = dataset_dir.path  # Use the local path for FlyteDirectory
+
+    data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
+    test_data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
 
     # Modify the model to add a new classification head based on the number of classes
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -273,13 +290,13 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
 
     # Load the test dataset for evaluation
 
-    transform = T.Compose([T.ToTensor()])
-    test_dataset = CocoDetection(
-        root="data/swag", annFile="data/swag/train.json", transform=transform
-    )
-    test_data_loader = DataLoader(
-        test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
-    )
+    # transform = T.Compose([T.ToTensor()])
+    # test_dataset = CocoDetection(
+    #     root="data/swag", annFile="data/swag/train.json", transform=transform
+    # )
+    # test_data_loader = DataLoader(
+    #     test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
+    # )
 
     for epoch in range(num_epochs):
         model.train()
@@ -329,7 +346,7 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
 
 
 # train_model(
-#     download_model(), dataset_dataloader("data/swag", "data/swag/train.json"), hyperparams
+#     download_model(), dataset_dataloader("data/swag", "data/sxwag/train.json"), hyperparams
 # )
 
 
@@ -339,7 +356,9 @@ def train_model(model: torch.nn.Module, data_loader: DataLoader, hyperparams: di
 
 @task(container_image=image,
     requests=Resources(cpu="2", mem="2Gi", gpu="1"))
-def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
+def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory):
+    data_loader = dataset_dataloader(root=str(dataset_dir), annFile="train.json")
+
 
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -369,10 +388,10 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
         root="data/swag/", annFile="data/swag/train.json", transform=test_transform
     )
 
-    # Use the custom collate function for the test dataset
-    test_data_loader = DataLoader(
-        test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
-    )
+    # # Use the custom collate function for the test dataset
+    # test_data_loader = DataLoader(
+    #     test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
+    # )
 
     # Function to display an image with its bounding boxes and labels
     def show_image_with_predictions(image, predictions):
@@ -410,7 +429,7 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
     # Visualize predictions on the test dataset
     model.eval()
     with torch.no_grad():
-        for images, targets in test_data_loader:
+        for images, targets in data_loader:
             images = list(image.to(device) for image in images)
 
             outputs = model(images)
@@ -436,11 +455,18 @@ def evaluate_model(model: torch.nn.Module, data_loader: DataLoader):
 # %%
 @workflow
 def object_detection_workflow():
+    # Download the dataset
+    dataset_dir = download_hf_dataset()
+
+    # Load the model
     model = download_model()
-    data_loader = dataset_dataloader("data/swag", "data/swag/train.json")
-    train_model(model=model, data_loader=data_loader, hyperparams=hyperparams)
-    evaluate_model(model=model, data_loader=data_loader)
+
+    # Train and evaluate the model, passing the dataset_dir as an argument
+    train_model(model=model, dataset_dir=dataset_dir, hyperparams=hyperparams)
+    # evaluate_model(model=model, dataset_dir=dataset_dir)
 
 # union run --remote workflow2.py object_detection_workflow
+# union run workflow2.py object_detection_workflow
+
 
 # union run --remote --copy-all workflow2.py object_detection_workflow
