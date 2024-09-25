@@ -1,6 +1,7 @@
 """
 Object Detection Workflow with Flyte and PyTorch using the Faster R-CNN model
 
+note: This Flyte workflow can be broken out into modular tasks for better organization and reusability!
 """
 # %%
 import matplotlib.patches as patches
@@ -67,12 +68,12 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 def dataset_dataloader(
-    root: str,
-    annFile: str,
-    batch_size=2,
-    shuffle=True,
-    num_workers=0,
-) -> DataLoader:
+                    root: str,
+                    annFile: str,
+                    batch_size=2,
+                    shuffle=True,
+                    num_workers=0,
+                ) -> DataLoader:
     # Define the transformations for the images
     transform = T.Compose([T.ToTensor()])
 
@@ -81,8 +82,6 @@ def dataset_dataloader(
 
 
     # Load the dataset
-    # dataset = CocoDetection(root='data/swag', annFile='data/swag/train.json', transform=transform)
-    # data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=collate_fn)
     dataset = CocoDetection(root=root, annFile=annFile_path, transform=transform)
     data_loader = DataLoader(
         dataset,
@@ -128,8 +127,6 @@ def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
 
     return FlyteDirectory(repo_path)
 
-# download_hf_dataset(local_dir="datasets",sub_folder="swag")
-
 # %% ------------------------------
 # visualize data - task
 # --------------------------------
@@ -162,9 +159,6 @@ def visualize_data():
         for i, image in enumerate(images):
             show_image_with_boxes(image, targets[i])
 
-# visualize_data()
-
-
 # %% ------------------------------
 # donwload model - task
 # --------------------------------
@@ -177,27 +171,19 @@ def download_model() -> torch.nn.Module:
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
         weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1, weights_only=True
     )
-    # model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
-    # model.to(device)
-    # print(model)
+
     return model
-
-
-# model = download_model()
-# print(model)
-# print(model.roi_heads.box_predictor.cls_score.in_features)
-
 
 # %% ------------------------------
 # train model - task
 # --------------------------------
 @task(container_image=image,
     requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams: dict) -> torch.nn.Module:
+def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs :int=3) -> torch.nn.Module:
 
     # TODO: make from dict
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
-    num_epochs = 10
+    num_epochs = num_epochs
     best_mean_iou = 0
     model_dir = "models"
 
@@ -207,8 +193,6 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
 
     os.makedirs(model_dir, exist_ok=True)
 
-    # data_loader = dataset_dataloader(root=dataset_dir, annFile="train.json")
-    # test_data_loader = dataset_dataloader(root=dataset_dir, annFile="train.json")
     local_dataset_dir = dataset_dir.path  # Use the local path for FlyteDirectory
 
     data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
@@ -344,18 +328,11 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, hyperparams
         mean_iou, accuracy = evaluate_model(model, test_data_loader)
         if mean_iou > best_mean_iou:
             best_mean_iou = mean_iou
-            # Path to save the model
-            # model_save_path = os.path.join(model_dir, "best_model.pth")
             torch.save(model.state_dict(), os.path.join(model_dir, "best_model.pth"))
             print("Best model saved")
 
     print("Training completed.")
     return model
-
-
-# train_model(
-#     download_model(), dataset_dataloader("data/swag", "data/sxwag/train.json"), hyperparams
-# )
 
 
 # %% ------------------------------
@@ -506,101 +483,16 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
     deck.append(html_report)
     ctx.decks.insert(0, deck)
 
-    
-
     return overall_report
 
-
-
-
-# @task(container_image=image,
-#       enable_deck=True,
-#       requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-
-# def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
-    
-#     dataset_dir.download()
-#     # model_dir.download()
-
-#     local_dataset_dir = dataset_dir.path
-#     # local_model_dir = model_dir.path 
-    
-#     data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json")
-#     model.to(device)
-#     model.eval()
-
-#     # Create a figure for displaying predictions in a 3x3 grid (9 images)
-#     num_images = 9  # Number of images to display in the grid
-#     fig, axes = plt.subplots(3, 3, figsize=(15, 15))  # Create a 3x3 grid
-#     axes = axes.flatten()  # Flatten the axes array for easier iteration
-
-#     with torch.no_grad():
-#         for idx, (images, targets) in enumerate(data_loader):
-#             if idx >= num_images:
-#                 break  # Stop after processing enough images for the grid
-
-#             image = images[0].to(device)
-#             output = model([image])[0]
-
-#             image = image.cpu().permute(1, 2, 0)  # Convert image to HWC format for plotting
-#             ax = axes[idx]
-
-#             ax.imshow(image)
-#             for j in range(len(output['boxes'])):
-#                 bbox = output['boxes'][j].cpu().numpy()
-#                 score = output['scores'][j].cpu().item()
-#                 label = output['labels'][j].cpu().item()
-
-#                 if score > 0.6:  # Only display predictions with confidence score above 0.7
-#                     rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1],
-#                                              linewidth=2, edgecolor='r', facecolor='none')
-#                     ax.add_patch(rect)
-#                     ax.text(bbox[0], bbox[1], f"{label}: {score:.2f}", color="white", fontsize=8,
-#                             bbox=dict(facecolor="red", alpha=0.5))
-
-#             ax.axis('off')  # Hide axes
-
-#     plt.tight_layout()
-
-#     # Save the grid image
-#     pred_boxes_imgs = "prediction_grid.png"
-#     plt.savefig(pred_boxes_imgs)
-#     plt.close()
-
-#     train_image_base64 = image_to_base64(pred_boxes_imgs)
-
-#     ctx = current_context()
-#     deck = Deck("Evaluation Results")
-#     html_report = dedent(f"""
-#     <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-#         <h2 style="color: #2C3E50;">Predicted Bounding Boxes</h2>
-#         <img src="data:image/png;base64,{train_image_base64}" width="600">
-#     </div>
-#     """)
-
-#     # Append HTML content to the deck
-#     deck.append(html_report)
-
-#     # Insert the deck into the context
-#     ctx.decks.insert(0, deck)
-
-
-#     # print("Evaluation completed.")
-#     # Return the image file to FlyteDeck
-#     return "test"
-
-
-# add IoU calculation for each photo and only show a few images in Flytedeck
 # %%
 @workflow
-def object_detection_workflow():
-    dataset_dir = download_hf_dataset()
+def object_detection_workflow() -> torch.nn.Module:
+    dataset_dir = download_hf_dataset(repo_id="sagecodes/union_flyte_swag_object_detection")
     model = download_model()
-    trained_model = train_model(model=model, dataset_dir=dataset_dir, hyperparams=hyperparams)
+    trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=3)
     evaluate_model(model=trained_model, dataset_dir=dataset_dir)
+    return model
 
 # union run --remote workflow2.py object_detection_workflow
 # union run workflow2.py object_detection_workflow
-
-
-# union run --remote --copy-all workflow2.py object_detection_workflow
