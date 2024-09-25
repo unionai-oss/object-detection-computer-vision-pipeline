@@ -1,0 +1,7 @@
+python-dotenv
+union==0.1.64
+torch 
+torchvision
+matplotlib
+pycocotools
+datasets
