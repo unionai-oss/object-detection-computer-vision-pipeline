@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.optim as optim
 import torchvision
-from flytekit import task, workflow, ImageSpec, Resources, current_context, Deck
+from flytekit import task, workflow, ImageSpec, Resources, current_context, Deck, Secret
 from torch.utils.data import DataLoader
 from torchvision.datasets import CocoDetection
 from torchvision.models.detection.faster_rcnn import \
@@ -21,12 +21,14 @@ from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
 import base64
 from textwrap import dedent
-
+from pathlib import Path
 
 from datasets import load_dataset
 import os
 import requests
+from dotenv import load_dotenv
 
+load_dotenv()
 
 image = ImageSpec(
     packages=[
@@ -36,6 +38,8 @@ image = ImageSpec(
         "matplotlib",
         "pycocotools",
         "datasets",
+        "huggingface_hub",
+        "python-dotenv",
     ],
 )
 
@@ -485,13 +489,58 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory) -> str:
 
     return overall_report
 
-# %%
+# %% ------------------------------
+# upload model to hub - task
+# --------------------------------
+@task(
+    container_image=image,
+    requests=Resources(cpu="2", mem="2Gi"),
+    secret_requests=[Secret(group=None, key="hf_token")],
+)
+def upload_model_to_hub(model: torch.nn.Module, repo_name: str = "sagecodes/cv-object") -> str:
+    from huggingface_hub import HfApi
+    # Get the Flyte context and define the model path
+    ctx = current_context()
+    model_path = "best_model.pth"  # Save the model locally as "best_model.pth"
+
+    # Save the model's state dictionary
+    torch.save(model.state_dict(), model_path)
+
+    # Set Hugging Face token from local environment or Flyte secrets
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token is None:
+        # If HF_TOKEN is not found, attempt to get it from the Flyte secrets
+        hf_token = ctx.secrets.get(key="hf_token")
+        print("Using Hugging Face token from Flyte secrets.")
+    else:
+        print("Using Hugging Face token from environment variable.")
+
+    # Create a new repository (if it doesn't exist) on Hugging Face Hub
+    api = HfApi()
+    api.create_repo(repo_name, token=hf_token, exist_ok=True)
+
+    # Upload the model to the Hugging Face repository
+    api.upload_file(
+        path_or_fileobj=model_path,      # Path to the local file
+        path_in_repo="pytorch_model.bin", # Destination path in the repo
+        repo_id=repo_name,
+        commit_message="Upload Faster R-CNN model",
+        token=hf_token
+    )
+
+    return f"Model uploaded to Hugging Face Hub: https://huggingface.co/{repo_name}"
+
+
+# %% ------------------------------
+# Object Detection Workflow
+# --------------------------------
 @workflow
 def object_detection_workflow() -> torch.nn.Module:
     dataset_dir = download_hf_dataset(repo_id="sagecodes/union_flyte_swag_object_detection")
     model = download_model()
-    trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=3)
+    trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=1)
     evaluate_model(model=trained_model, dataset_dir=dataset_dir)
+    upload_model_to_hub(model=trained_model, repo_name="sagecodes/cv-object")
     return model
 
 # union run --remote workflow2.py object_detection_workflow
