@@ -32,7 +32,8 @@ load_dotenv()
 
 image = ImageSpec(
     packages=[
-        "union==0.1.64",
+        "union==0.1.85",
+        "flytekit==1.13.8",
         "torch",
         "torchvision",
         "matplotlib",
