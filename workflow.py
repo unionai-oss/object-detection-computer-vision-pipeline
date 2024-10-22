@@ -125,33 +125,87 @@ def download_hf_dataset(repo_id: str = 'sagecodes/union_swag_coco',
 # visualize data - task
 # --------------------------------
 @task(container_image=image,
-    requests=Resources(cpu="2", mem="2Gi"))
-def visualize_data():
-    data_loader = dataset_dataloader("data/swag", "data/swag/train.json")
+      enable_deck=True,
+      requests=Resources(cpu="2", mem="4Gi"))
+def verify_data_and_annotations(dataset_dir: FlyteDirectory) -> FlyteFile:
+    
+    import matplotlib.patches as patches
+    import matplotlib.pyplot as plt
 
-    # Function to display an image with its bounding boxes
-    def show_image_with_boxes(image, annotations):
-        fig, ax = plt.subplots(1)
-        ax.imshow(image.permute(1, 2, 0))
+    # Download the dataset locally from the FlyteDirectory
+    dataset_dir.download()
+    local_dataset_dir = dataset_dir.path
+    
+    # Load the dataset
+    data_loader = dataset_dataloader(root=local_dataset_dir, annFile="train.json", shuffle=True)
+    
+    # Number of images to display
+    num_images = 9
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))  # Create a 3x3 grid
+    axes = axes.flatten()  # Flatten the axes array for easier iteration
+    
+    images_plotted = 0  # Counter for images plotted
 
-        for annotation in annotations:
-            bbox = annotation["bbox"]
-            rect = patches.Rectangle(
-                (bbox[0], bbox[1]),
-                bbox[2],
-                bbox[3],
-                linewidth=1,
-                edgecolor="r",
-                facecolor="none",
-            )
-            ax.add_patch(rect)
-
-        plt.show()
-
-    # Visualize a batch of images
-    for images, targets in data_loader:
+    # Plot images along with annotations
+    for batch_idx, (images, targets) in enumerate(data_loader):
         for i, image in enumerate(images):
-            show_image_with_boxes(image, targets[i])
+            if images_plotted >= num_images:
+                break  # Limit to 9 images
+            
+            # Plot the image
+            img = image.cpu().permute(1, 2, 0)  # Convert image to HWC format for plotting
+            ax = axes[images_plotted]  # Access the correct subplot
+            ax.imshow(img)
+
+            # Iterate over the list of annotations (objects) for the current image
+            for annotation in targets[i]:
+                # Extract the bounding box
+                bbox = annotation['bbox']  # This is in [x_min, y_min, width, height] format
+                
+                # Convert [x_min, y_min, width, height] to [x_min, y_min, x_max, y_max]
+                x_min, y_min, width, height = bbox
+                x_max = x_min + width
+                y_max = y_min + height
+
+                # Draw the bounding box
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor='r', facecolor='none')
+                ax.add_patch(rect)
+
+            # Increment image counter
+            images_plotted += 1
+
+        if images_plotted >= num_images:
+            break  # Stop if we've plotted the desired number of images
+
+    plt.tight_layout()
+
+    # Save the grid of images and annotations
+    output_img = "data_verification_grid.png"
+    plt.savefig(output_img)
+    plt.close()
+
+    # Convert the image to base64 for display in FlyteDeck
+    verification_image_base64 = image_to_base64(output_img)
+
+    # Display the results in FlyteDeck
+    ctx = current_context()
+    deck = Deck("Data Verification")
+    html_report = dedent(f"""
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+       <h2 style="color: #2C3E50;">Data Verification: Images and Annotations</h2>
+        <img src="data:image/png;base64,{verification_image_base64}" width="600">
+    </div>
+    """)
+
+    # Append the HTML content to the deck
+    deck.append(html_report)
+    ctx.decks.insert(0, deck)
+
+    # Return the image file for further use in the workflow
+    return FlyteFile(output_img)
+
+
 
 # %% ------------------------------
 # donwload model - task
@@ -545,6 +599,7 @@ def upload_model_to_hub(model: torch.nn.Module, repo_name: str = "sagecodes/cv-o
 @workflow
 def object_detection_workflow() -> torch.nn.Module:
     dataset_dir = download_hf_dataset(repo_id="sagecodes/union_flyte_swag_object_detection")
+    verify_data_and_annotations(dataset_dir=dataset_dir)
     model = download_model()
     trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=2)
     evaluate_model(model=trained_model, dataset_dir=dataset_dir)
