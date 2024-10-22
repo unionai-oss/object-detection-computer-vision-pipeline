@@ -34,6 +34,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Check and set the available device for local development
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using {device} device")
+
 image = ImageSpec(
     packages=[
         "union==0.1.85",
@@ -48,24 +52,8 @@ image = ImageSpec(
     ],
 )
 
-# Check and set the available device
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using {device} device")
-
-hyperparams = {
-    "batch_size": 2,
-    "num_workers": 4,
-    "lr": 0.005,
-    "momentum": 0.9,
-    "weight_decay": 0.0005,
-    "step_size": 3,
-    "gamma": 0.1,
-    "num_epochs": 1,
-}
-
-
 # %% ------------------------------
-# Data loading helper functions
+# helper functions
 # --------------------------------
 
 # Convert images to base64 and embed in HTML
@@ -87,9 +75,6 @@ def dataset_dataloader(
     transform = T.Compose([T.ToTensor()])
 
     annFile_path = os.path.join(str(root), annFile)
-    print(f"Annotation file path: {annFile_path}")  # Debugging the annotation file path
-
-
     # Load the dataset
     dataset = CocoDetection(root=root, annFile=annFile_path, transform=transform)
     data_loader = DataLoader(
@@ -189,7 +174,6 @@ def download_model() -> torch.nn.Module:
         weights=FasterRCNN_MobileNet_V3_Large_320_FPN_Weights, weights_only=True
     )
 
-
     return model
 
 # %% ------------------------------
@@ -197,7 +181,7 @@ def download_model() -> torch.nn.Module:
 # --------------------------------
 @task(container_image=image,
     requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs :int=3) -> torch.nn.Module:
+def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs :int=10) -> torch.nn.Module:
 
     # TODO: make from dict
     num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
@@ -228,7 +212,7 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs 
 
     # Define optimizer and learning rate
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+    optimizer = optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
 
     # Learning rate scheduler
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
@@ -359,7 +343,7 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs 
 @task(container_image=image,
       enable_deck=True,
       requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshold: float=0.2) -> str:
+def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshold: float = 0.70) -> str:
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
@@ -379,6 +363,8 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
     report = []  # To store the IoU and accuracy report for each image
     global_image_index = 0  # Global image counter across batches
     images_plotted = 0  # Counter for images plotted in the grid
+
+    correct_predictions, total_predictions = 0, 0
 
     with torch.no_grad():
         for batch_idx, (images, targets) in enumerate(data_loader):
@@ -404,7 +390,15 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
 
             for i, output in enumerate(outputs):
                 pred_boxes = output["boxes"]
+                pred_scores = output["scores"]
+                pred_labels = output["labels"]
                 true_boxes = targets[i]["boxes"]
+                true_labels = targets[i]["labels"]
+
+                # Filter predictions by confidence threshold
+                high_conf_indices = pred_scores > threshold
+                pred_boxes = pred_boxes[high_conf_indices]
+                pred_labels = pred_labels[high_conf_indices]
 
                 # Get the global image index
                 image_index = global_image_index + i
@@ -413,20 +407,21 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
                     report.append(f"Image {image_index}: No valid predictions or ground truths")
                     continue
 
-                # Calculate IoU
+                # Calculate IoU and match predictions to ground truth based on IoU
                 iou = box_iou(pred_boxes, true_boxes)
-                mean_iou = iou.mean().item()
+                max_iou_indices = iou.argmax(dim=1)  # Find the best matching true box for each predicted box
+
+                # Calculate accuracy based on matching boxes
+                matched_true_labels = true_labels[max_iou_indices]  # Match true labels with best IoU
+                correct_predictions += (pred_labels == matched_true_labels).sum().item()
+                total_predictions += len(pred_labels)
+
+                # Calculate mean IoU
+                mean_iou = iou.max(dim=1)[0].mean().item()  # Get the highest IoU for each predicted box
                 iou_list.append(mean_iou)
 
-                # Calculate accuracy
-                pred_labels = output["labels"]
-                true_labels = targets[i]["labels"]
-                min_size = min(len(pred_labels), len(true_labels))
-                correct_predictions = (pred_labels[:min_size] == true_labels[:min_size]).sum().item()
-                accuracy = correct_predictions / min_size if min_size else 0
-                accuracy_list.append(accuracy)
-
                 # Append report for this image
+                accuracy = correct_predictions / total_predictions if total_predictions else 0
                 report.append(f"Image {image_index}: IoU = {mean_iou:.4f}, Accuracy = {accuracy:.4f}")
 
                 # Plot images (limit to num_images)
@@ -435,12 +430,12 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
                     ax = axes[images_plotted]  # Access the correct subplot
 
                     ax.imshow(img)
-                    for j in range(len(output['boxes'])):
-                        bbox = output['boxes'][j].cpu().numpy()
-                        score = output['scores'][j].cpu().item()
-                        label = output['labels'][j].cpu().item()
+                    for j in range(len(pred_boxes)):
+                        bbox = pred_boxes[j].cpu().numpy()
+                        score = pred_scores[high_conf_indices][j].cpu().item()
+                        label = pred_labels[j].cpu().item()
 
-                        if score > threshold:  # Only display predictions with confidence score above
+                        if score > threshold:  # Only display predictions with confidence score above threshold
                             rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1],
                                                      linewidth=2, edgecolor='r', facecolor='none')
                             ax.add_patch(rect)
@@ -457,9 +452,7 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
 
     # Compute overall metrics
     overall_iou = sum(iou_list) / len(iou_list) if iou_list else 0
-    overall_accuracy = sum(accuracy_list) / len(accuracy_list) if accuracy_list else 0
-
-
+    overall_accuracy = correct_predictions / total_predictions if total_predictions else 0
 
     # Save the image grid
     pred_boxes_imgs = "prediction_grid.png"
@@ -502,6 +495,7 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
     ctx.decks.insert(0, deck)
 
     return overall_report
+
 
 # %% ------------------------------
 # upload model to hub - task
