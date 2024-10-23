@@ -32,6 +32,9 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+
 load_dotenv()
 
 # Check and set the available device for local development
@@ -235,10 +238,10 @@ def download_model() -> torch.nn.Module:
 # --------------------------------
 @task(container_image=image,
     requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs :int=10) -> torch.nn.Module:
+def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs: int, num_classes: int) -> torch.nn.Module:
 
     # TODO: make from dict
-    num_classes = 3  # number of classes + background (TODO: add one for the background class automatically)
+    num_classes = num_classes  # number of classes + background (TODO: add one for the background class automatically)
     num_epochs = num_epochs
     best_mean_iou = 0
     model_dir = "models"
@@ -397,7 +400,7 @@ def train_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, num_epochs 
 @task(container_image=image,
       enable_deck=True,
       requests=Resources(cpu="2", mem="8Gi", gpu="1"))
-def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshold: float = 0.70) -> str:
+def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshold: float = 0.75) -> str:
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
@@ -559,7 +562,7 @@ def evaluate_model(model: torch.nn.Module, dataset_dir: FlyteDirectory, threshol
     requests=Resources(cpu="2", mem="2Gi"),
     secret_requests=[Secret(group=None, key="hf_token")],
 )
-def upload_model_to_hub(model: torch.nn.Module, repo_name: str = "sagecodes/cv-object") -> str:
+def upload_model_to_hub(model: torch.nn.Module, repo_name: str) -> str:
     from huggingface_hub import HfApi
     # Get the Flyte context and define the model path
     ctx = current_context()
@@ -597,14 +600,16 @@ def upload_model_to_hub(model: torch.nn.Module, repo_name: str = "sagecodes/cv-o
 # Object Detection Workflow
 # --------------------------------
 @workflow
-def object_detection_workflow() -> torch.nn.Module:
+def object_detection_workflow(hf_repo_id: str, epochs: int =3, classes:int =3) -> torch.nn.Module:
+    
     dataset_dir = download_hf_dataset(repo_id="sagecodes/union_flyte_swag_object_detection")
-    verify_data_and_annotations(dataset_dir=dataset_dir)
     model = download_model()
-    trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=2)
+    verify_data_and_annotations(dataset_dir=dataset_dir)
+    trained_model = train_model(model=model, dataset_dir=dataset_dir, num_epochs=epochs, num_classes=classes)
     evaluate_model(model=trained_model, dataset_dir=dataset_dir)
-    upload_model_to_hub(model=trained_model, repo_name="sagecodes/cv-modelnet-object-320")
+    upload_model_to_hub(model=trained_model, repo_name=hf_repo_id)
+
     return model
 
 # union run --remote workflow.py object_detection_workflow
-# union run workflow.py object_detection_workflow
+# union run --remote workflow.py object_detection_workflow --epochs 3 --hf_repo_id "sagecodes/cv-object-mobilenet"
